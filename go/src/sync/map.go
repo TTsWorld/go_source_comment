@@ -25,7 +25,7 @@ import (
 //
 // The zero Map is empty and ready for use. A Map must not be copied after first use.
 type Map struct {
-	mu Mutex
+	mu Mutex //互斥锁，用于保护 read 和 dirty。
 
 	// read contains the portion of the map's contents that are safe for
 	// concurrent access (with or without mu held).
@@ -36,6 +36,8 @@ type Map struct {
 	// Entries stored in read may be updated concurrently without mu, but updating
 	// a previously-expunged entry requires that the entry be copied to the dirty
 	// map and unexpunged with mu held.
+	//只读数据，支持并发读取（atomic.Value 类型）。如果涉及到更新操作，则只需要加锁来保证数据安全。
+	//read 实际存储的是 readOnly 结构体，内部也是一个原生 map，amended 属性用于标记 read 和 dirty 的数据是否一致。
 	read atomic.Value // readOnly
 
 	// dirty contains the portion of the map's contents that require mu to be
@@ -48,6 +50,7 @@ type Map struct {
 	//
 	// If the dirty map is nil, the next write to the map will initialize it by
 	// making a shallow copy of the clean map, omitting stale entries.
+	// 读写数据，是一个原生 map，也就是非线程安全。操作 dirty 需要加锁来保证数据安全。
 	dirty map[any]*entry
 
 	// misses counts the number of loads since the read map was last updated that
@@ -56,10 +59,12 @@ type Map struct {
 	// Once enough misses have occurred to cover the cost of copying the dirty
 	// map, the dirty map will be promoted to the read map (in the unamended
 	// state) and the next store to the map will make a new dirty copy.
+	//统计有多少次读取 read 没有命中。每次 read 中读取失败后，misses 的计数值都会加 1。
 	misses int
 }
 
 // readOnly is an immutable struct stored atomically in the Map.read field.
+// readOnly 是以原子方式存储在 Map 中的不可变结构
 type readOnly struct {
 	m       map[any]*entry
 	amended bool // true if the dirty map contains some key not in m.
@@ -67,6 +72,7 @@ type readOnly struct {
 
 // expunged is an arbitrary pointer that marks entries which have been deleted
 // from the dirty map.
+// “已删除”是一个任意指针，用于标记已从脏映射中删除的条目
 var expunged = unsafe.Pointer(new(any))
 
 // An entry is a slot in the map corresponding to a particular key.
@@ -144,6 +150,7 @@ func (m *Map) Store(key, value any) {
 	read, _ = m.read.Load().(readOnly)
 	if e, ok := read.m[key]; ok {
 		if e.unexpungeLocked() {
+			// 该条目之前已被删除，这意味着存在一个非 nil 脏映射，并且此条目不在其中。
 			// The entry was previously expunged, which implies that there is a
 			// non-nil dirty map and this entry is not in it.
 			m.dirty[key] = e
@@ -167,10 +174,12 @@ func (m *Map) Store(key, value any) {
 //
 // If the entry is expunged, tryStore returns false and leaves the entry
 // unchanged.
+// 如果 当前值 尚未 清除，tryStore 将存储一个值。
+// 如果删除该这个值，tryStore 将返回 false 并保持该值不变
 func (e *entry) tryStore(i *any) bool {
 	for {
 		p := atomic.LoadPointer(&e.p)
-		if p == expunged {
+		if p == expunged { //已删除
 			return false
 		}
 		if atomic.CompareAndSwapPointer(&e.p, p, unsafe.Pointer(i)) {
