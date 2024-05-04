@@ -54,6 +54,7 @@ type hchan struct {
 	// with stack shrinking.
 	//当持有此锁时不应该改变其他 G 的状态（特别的，不ready 一个 G）,因为他会在栈回收时发生死锁
 	lock mutex //字段 lock 用来保证每个读 channel 或写 channel 的操作都是原子的操作。
+	//
 }
 
 // 字段 waitq 是 sudog 的一个双向链表,而 sudog 实际上是对 goroutine 的一个封装:
